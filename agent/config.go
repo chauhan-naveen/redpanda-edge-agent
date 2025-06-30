@@ -66,21 +66,24 @@ type Topic struct {
 	destinationReplicas   int
 	destinationPartitions int
 	customPartitioning    bool
+	configs               map[string]string `koanf:"configs"`
 }
 
 func (t Topic) String() string {
+	configStr := ""
+	if len(t.configs) > 0 {
+		configStr = fmt.Sprintf(", configs=%v", t.configs)
+	}
 	if t.direction == Push {
-		return fmt.Sprintf("%s > %s",
-			t.sourceName, t.destinationName)
+		return fmt.Sprintf("%s > %s (partitions=%d, replicas=%d, custom_partitioning=%v%s)",
+			t.sourceName, t.destinationName, t.destinationPartitions, t.destinationReplicas, t.customPartitioning, configStr)
 	} else {
-		return fmt.Sprintf("%s < %s",
-			t.sourceName, t.destinationName)
+		return fmt.Sprintf("%s < %s (partitions=%d, replicas=%d, custom_partitioning=%v%s)",
+			t.sourceName, t.destinationName, t.destinationPartitions, t.destinationReplicas, t.customPartitioning, configStr)
 	}
 }
 
 // Returns the name of the topic to consume from.
-// If the topic direction is `Push` then consume from the source topic.
-// If the topic direction is `Pull` then consume from the destination topic.
 func (t Topic) consumeFrom() string {
 	if t.direction == Push {
 		return t.sourceName
@@ -90,8 +93,6 @@ func (t Topic) consumeFrom() string {
 }
 
 // Returns the name of the topic to produce to.
-// If the topic direction is `Push` then produce to the destination topic.
-// If the topic direction is `Pull` then produce to the source topic.
 func (t Topic) produceTo() string {
 	if t.direction == Push {
 		return t.destinationName
@@ -147,37 +148,69 @@ func InitConfig(path *string) {
 	if err := config.Load(file.Provider(*path), yaml.Parser()); err != nil {
 		log.Errorf("Error loading config: %v", err)
 	}
-	log.Debugf(config.Sprint())
+	log.Debugf("Configuration loaded: %s", config.Sprint())
 	validate()
-
 }
 
 // Parse topic configuration
 func parseTopics(config *koanf.Koanf, direction Direction) []Topic {
 	var all []Topic
-	var topic Topic
-
-	configStr := "source.topics.topic"
+	configStr := "source.topics"
 	if direction == Pull {
-		configStr = "destination.topics.topic"
+		configStr = "destination.topics"
 	}
 
-	i := 0
-	topicConfig := configStr + strconv.Itoa(i)
-
-	for config.String(topicConfig) != "" {
-		i++
-		topic.destinationName = config.String(topicConfig + ".destination")
-		log.Debugf("Discovered topic :%v", topic.destinationName)
-		topic.sourceName = config.String(topicConfig + ".source")
-		topic.destinationReplicas = config.Int(topicConfig + ".replicas")
-		topic.destinationPartitions = config.Int(topicConfig + ".partition_count")
-		topic.customPartitioning = config.Bool(topicConfig + ".custom_partitioning_enabled")
-		topicConfig = configStr + strconv.Itoa(i)
-		topic.direction = Push
+	// Get all configuration keys
+	keys := config.Keys()
+	log.Debugf("Keys for %s: %v", configStr, keys)
+	processed := make(map[string]bool)
+	for _, key := range keys {
+		if !strings.HasPrefix(key, configStr+".") {
+			continue
+		}
+		// Extract topic ID (e.g., topic0, topic1)
+		parts := strings.Split(key, ".")
+		if len(parts) < 3 || parts[1] != "topics" {
+			log.Debugf("Skipping key %s: not a topic field", key)
+			continue
+		}
+		topicID := parts[2]
+		if processed[topicID] {
+			continue
+		}
+		topicConfig := configStr + "." + topicID
+		topic := Topic{
+			destinationName:       config.String(topicConfig+".destination"),
+			sourceName:            config.String(topicConfig+".source"),
+			destinationReplicas:   config.Int(topicConfig+".replicas"),
+			destinationPartitions: config.Int(topicConfig+".partition_count"),
+			customPartitioning:    config.Bool(topicConfig+".custom_partitioning_enabled"),
+			direction:             direction,
+		}
+		if topic.sourceName == "" || topic.destinationName == "" {
+			log.Errorf("Skipping topic %s: source and destination must be set", topicID)
+			continue
+		}
+		if topic.destinationPartitions <= 0 || topic.destinationReplicas <= 0 {
+			log.Errorf("Skipping topic %s: partition_count and replicas must be positive", topicID)
+			continue
+		}
+		// Parse topic configurations
+		configPath := topicConfig + ".configs"
+		if config.Exists(configPath) {
+			configs := make(map[string]string)
+			if err := config.Unmarshal(configPath, &configs); err != nil {
+				log.Errorf("Skipping topic %s: failed to parse configs: %v", topicID, err)
+				continue
+			}
+			topic.configs = configs
+		}
+		log.Debugf("Discovered topic %s: %v", topicID, topic)
 		all = append(all, topic)
+		processed[topicID] = true
 	}
 
+	log.Debugf("Parsed %d topics for %s: %v", len(all), configStr, all)
 	return all
 }
 
@@ -194,14 +227,10 @@ func AllTopics() []Topic {
 }
 
 // Check for circular dependency
-// t1.src > t1.dst
-// t2.src < t2.dst
 func circular(t1, t2 *Topic) bool {
 	if t1.direction != t2.direction {
-		if t1.sourceName == t2.sourceName {
-			if t1.destinationName == t2.destinationName {
-				return true
-			}
+		if t1.sourceName == t2.sourceName && t1.destinationName == t2.destinationName {
+			return true
 		}
 	}
 	return false
@@ -215,12 +244,21 @@ func validate() {
 
 	topics := AllTopics()
 	if len(topics) == 0 {
-		log.Fatal("No push or pull topics configured")
+		log.Warn("No push or pull topics configured")
+		return
 	}
 	for i, t1 := range topics {
 		for k, t2 := range topics {
-			if (i != k) && (t1 == t2) {
-				log.Fatalf("Duplicate topic configured: %s", t1.String())
+			// Compare fields explicitly to avoid map comparison
+			if i != k {
+				if t1.sourceName == t2.sourceName &&
+					t1.destinationName == t2.destinationName &&
+					t1.direction == t2.direction &&
+					t1.destinationPartitions == t2.destinationPartitions &&
+					t1.destinationReplicas == t2.destinationReplicas &&
+					t1.customPartitioning == t2.customPartitioning {
+					log.Fatalf("Duplicate topic configured: %s", t1.String())
+				}
 			}
 			if circular(&t1, &t2) {
 				log.Fatalf("Topic circular dependency configured: (%s) (%s)",
@@ -228,6 +266,7 @@ func validate() {
 			}
 		}
 	}
+	log.Infof("Validated %d topics: %v", len(topics), topics)
 }
 
 // Initializes the necessary TLS configuration options
@@ -258,7 +297,6 @@ func SASLOpt(config *SASLConfig, opts []kgo.Opt) []kgo.Opt {
 	if config.SaslMethod != "" ||
 		config.SaslUsername != "" ||
 		config.SaslPassword != "" {
-
 		if config.SaslMethod == "" ||
 			config.SaslUsername == "" ||
 			config.SaslPassword == "" {

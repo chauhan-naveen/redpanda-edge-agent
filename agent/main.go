@@ -56,6 +56,7 @@ func shutdown() {
 func initClient(rp *Redpanda, mutex *sync.Once, prefix Prefix) {
 	mutex.Do(func() {
 		var err error
+		log.Debugf("Initializing client for %s with bootstrap servers: %s", prefix, config.String(string(prefix)+".bootstrap_servers"))
 		name := config.String(
 			fmt.Sprintf("%s.name", prefix))
 		servers := config.String(
@@ -72,6 +73,8 @@ func initClient(rp *Redpanda, mutex *sync.Once, prefix Prefix) {
 			fmt.Sprintf("%s.consumer_group_id", prefix))
 
 		opts := []kgo.Opt{}
+		opts = append(opts, kgo.DialTimeout(30*time.Second))
+		opts = append(opts, kgo.FetchMaxWait(30*time.Second))
 		opts = append(opts,
 			kgo.SeedBrokers(strings.Split(servers, ",")...),
 			// https://github.com/redpanda-data/redpanda/issues/8546
@@ -110,6 +113,11 @@ func initClient(rp *Redpanda, mutex *sync.Once, prefix Prefix) {
 		if err != nil {
 			log.Fatalf("Unable to load client: %v", err)
 		}
+		if err := rp.client.Ping(context.Background()); err != nil {
+			log.Errorf("Failed to ping %s cluster: %v", prefix, err)
+		} else {
+			log.Debugf("Successfully pinged %s cluster", prefix)
+		}
 		// Check connectivity to cluster
 		if err = rp.client.Ping(context.Background()); err != nil {
 			log.Errorf("Unable to ping %s cluster: %s",
@@ -138,7 +146,7 @@ func contains(s []string, e string) bool {
 	return false
 }
 
-// Check the topics exist on the given cluster. If the topics to not exist then
+// Check the topics exist on the given cluster. If the topics do not exist then
 // this function will attempt to create them if configured to do so.
 func checkTopics(cluster *Redpanda) {
 	ctx := context.Background()
@@ -163,26 +171,83 @@ func checkTopics(cluster *Redpanda) {
 		return
 	}
 
+	// Get source topic configurations for push topics
+	sourceConfigs := make(map[string]map[string]*string)
+	if cluster.prefix == Destination {
+		sourceAdm := kadm.NewClient(source.client)
+		defer sourceAdm.Close()
+		for _, topic := range GetTopics(Source) { // Only process push topics
+			configs := make(map[string]*string)
+			resourceConfigs, err := sourceAdm.DescribeTopicConfigs(ctx, topic.sourceName)
+			if err == nil {
+				for _, rc := range resourceConfigs {
+					if rc.Name == topic.sourceName && rc.Configs != nil {
+						for _, cfg := range rc.Configs {
+							if cfg.Value != nil {
+								v := *cfg.Value
+								configs[cfg.Key] = &v
+							}
+						}
+						break
+					}
+				}
+			}
+			if err != nil {
+				log.Warnf("Failed to get configs for source topic %s: %v, using agent.yaml configs only", topic.sourceName, err)
+				sourceConfigs[topic.sourceName] = make(map[string]*string)
+			} else {
+				sourceConfigs[topic.sourceName] = configs
+			}
+		}
+	}
+
 	for topicName, topic := range createTopics {
 		if !topicDetails.Has(topicName) {
-			if config.Exists("create_topics") {
-				resp, _ := cluster.adm.CreateTopics(ctx, int32(topic.destinationPartitions), int16(topic.destinationReplicas), nil, topicName)
+			if config.Exists("create_topics") && config.Bool("create_topics") {
+				configMap := make(map[string]*string)
+				if cluster.prefix == Destination {
+					// Copy source topic configs for push topics
+					if sourceConfig, exists := sourceConfigs[topic.sourceName]; exists {
+						for key, value := range sourceConfig {
+							if value != nil {
+								v := *value
+								configMap[key] = &v
+							}
+						}
+					}
+					// Override with agent.yaml configs
+					for key, value := range topic.configs {
+						v := value
+						configMap[key] = &v
+					}
+				} else {
+					// For source cluster, use only agent.yaml configs
+					for key, value := range topic.configs {
+						v := value
+						configMap[key] = &v
+					}
+				}
+				resp, err := cluster.adm.CreateTopics(ctx, int32(topic.destinationPartitions), int16(topic.destinationReplicas), configMap, topicName)
+				if err != nil {
+					log.Warnf("Unable to create topic '%s' on %s: %s", topicName, cluster.name, err)
+					continue
+				}
 				for _, ctr := range resp {
 					if ctr.Err != nil {
 						log.Warnf("Unable to create topic '%s' on %s: %s",
 							ctr.Topic, cluster.name, ctr.Err)
 					} else {
-						log.Infof("Created topic '%s' on %s",
-							ctr.Topic, cluster.name)
+						log.Infof("Created topic '%s' on %s with configs: %v",
+							ctr.Topic, cluster.name, configMap)
 					}
 				}
 			} else {
 				log.Fatalf("Topic '%s' does not exist on %s",
-					topic, cluster.name)
+					topicName, cluster.name)
 			}
 		} else {
 			log.Infof("Topic '%s' already exists on %s",
-				topic, cluster.name)
+				topicName, cluster.name)
 		}
 	}
 }
@@ -251,6 +316,11 @@ func forwardRecords(src *Redpanda, dst *Redpanda, ctx context.Context) {
 			// Only poll when the previous fetches were successfully
 			// sent and committed
 			logWithId("debug", src.name, "Polling for records...")
+			consumeTopics := make([]string, 0, len(src.topics))
+			for _, t := range src.topics {
+				consumeTopics = append(consumeTopics, t.consumeFrom())
+			}
+			logWithId("debug", src.name, fmt.Sprintf("Consuming topics: %v", consumeTopics))
 			fetches = src.client.PollRecords(
 				ctx, config.Int("max_poll_records"))
 			if errs := fetches.Errors(); len(errs) > 0 {
@@ -260,6 +330,7 @@ func forwardRecords(src *Redpanda, dst *Redpanda, ctx context.Context) {
 							fmt.Sprintf("Received interrupt: %s", e.Err))
 						return
 					}
+					logWithId("error", src.name, fmt.Sprintf("Fetch error: %s, topic=%s, partition=%d", e.Err, e.Topic, e.Partition))
 					logWithId("error", src.name,
 						fmt.Sprintf("Fetch error: %s", e.Err))
 				}
@@ -271,6 +342,8 @@ func forwardRecords(src *Redpanda, dst *Redpanda, ctx context.Context) {
 				iter := fetches.RecordIter()
 				for !iter.Done() {
 					record := iter.Next()
+					logWithId("trace", src.name,
+						fmt.Sprintf("Fetched record: topic=%s, partition=%d, offset=%d", record.Topic, record.Partition, record.Offset))
 					// Change the topic name if necessary
 					changeName := topicMap[record.Topic]
 					if changeName != "" {
@@ -366,6 +439,13 @@ func main() {
 	InitConfig(configFile)
 	initClient(&source, &sourceOnce, Source)
 	initClient(&destination, &destinationOnce, Destination)
+
+	// Log topics for debugging
+	log.Infof("Source topics: %v", source.topics)
+	log.Infof("Destination topics: %v", destination.topics)
+	if len(AllTopics()) == 0 {
+		log.Fatal("No valid push or pull topics configured after validation. Check agent.yaml for invalid fields or validation errors in config.go")
+	}
 
 	checkTopics(&source)
 	checkTopics(&destination)
