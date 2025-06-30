@@ -84,6 +84,8 @@ func (t Topic) String() string {
 }
 
 // Returns the name of the topic to consume from.
+// If the topic direction is `Push` then consume from the source topic.
+// If the topic direction is `Pull` then consume from the destination topic.
 func (t Topic) consumeFrom() string {
 	if t.direction == Push {
 		return t.sourceName
@@ -93,6 +95,8 @@ func (t Topic) consumeFrom() string {
 }
 
 // Returns the name of the topic to produce to.
+// If the topic direction is `Push` then produce to the destination topic.
+// If the topic direction is `Pull` then produce to the source topic.
 func (t Topic) produceTo() string {
 	if t.direction == Push {
 		return t.destinationName
