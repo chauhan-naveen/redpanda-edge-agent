@@ -175,7 +175,6 @@ func checkTopics(cluster *Redpanda) {
 	sourceConfigs := make(map[string]map[string]*string)
 	if cluster.prefix == Destination {
 		sourceAdm := kadm.NewClient(source.client)
-		defer sourceAdm.Close()
 		for _, topic := range GetTopics(Source) { // Only process push topics
 			configs := make(map[string]*string)
 			resourceConfigs, err := sourceAdm.DescribeTopicConfigs(ctx, topic.sourceName)
@@ -227,7 +226,14 @@ func checkTopics(cluster *Redpanda) {
 						configMap[key] = &v
 					}
 				}
-				resp, err := cluster.adm.CreateTopics(ctx, int32(topic.destinationPartitions), int16(topic.destinationReplicas), configMap, topicName)
+				resp := make(map[string]kadm.CreateTopicResponse)
+				var err error
+				if topic.sourceName == "_schemas" {
+					resp, err = cluster.adm.CreateTopics(ctx, int32(topic.destinationPartitions), int16(topic.destinationReplicas), nil, topicName)
+				} else {
+					resp, err = cluster.adm.CreateTopics(ctx, int32(topic.destinationPartitions), int16(topic.destinationReplicas), configMap, topicName)
+				}
+
 				if err != nil {
 					log.Warnf("Unable to create topic '%s' on %s: %s", topicName, cluster.name, err)
 					continue
