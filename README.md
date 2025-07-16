@@ -83,12 +83,18 @@ source:
             partition_count: 10
             replicas: 1
             custom_partitioning_enabled: false
+            configs:
+              cleanup.policy: "compact"
+              retention.ms: "7200000"
         topic2:
             destination: "telemetryC"
             source: "telemetryB"
             partition_count: 10
             replicas: 1
             custom_partitioning_enabled: true
+            configs:
+              cleanup.policy: "compact"
+              retention.ms: "7200000"
     # Set the consumer group for the agent to join and consume in. Defaults to
     # the agent id if not set.
     consumer_group_id: ""
