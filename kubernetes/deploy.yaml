@@ -10,11 +10,36 @@ data:
     create_topics: true
     source:
       name: "source"
-      bootstrap_servers: redpanda-src:10092 # use secured internal interface
+      bootstrap_servers: redpanda-primary-0:9093,redpanda-primary-1:9093,redpanda-primary-2:9093
+      consumer_group_id: "redpanda-edge-agent"
       # List of outbound topics to push from source to destination
       topics:
-        - telemetry1
-        - telemetry2
+        topic0:
+          destination: "_schemas"
+          source: "_schemas"
+          partition_count: 1
+          replicas: 3
+          custom_partitioning_enabled: false
+        topic1:
+          destination: "test-data"
+          source: "test-data"
+          partition_count: 10
+          replicas: 3
+          custom_partitioning_enabled: true
+          configs:
+            cleanup.policy: "compact"
+            retention.ms: "3600000"
+            segment.bytes: "67108864"
+        topic2:
+          destination: "test-events"
+          source: "test-events"
+          partition_count: 5
+          replicas: 3
+          custom_partitioning_enabled: true
+          configs:
+            cleanup.policy: "compact"
+            retention.ms: "86400000"
+            segment.bytes: "67108864"
       tls:
         enabled: false
         client_key: "/etc/redpanda/certs/agent.key"
@@ -22,12 +47,17 @@ data:
         ca_cert: "/etc/redpanda/certs/ca.crt"
     destination:
       name: "destination"
-      bootstrap_servers: redpanda-dest:10092 # use secured internal interface
+      bootstrap_servers: redpanda-replica-0:9093,redpanda-replica-1:9093,redpanda-replica-2:9093
       max_version: "3.0.0" # maximum kafka protocol version
-      # List of inbound topics to pull from destination to source
-      topics:
-        - config1
-        - config2
+      # List of inbound topics to pull from destination to source, If you don't want to pull data from the destination to the source, keep the topics commented out
+      #topics:
+      #  topic0:
+      #  topic1:
+      #  SASL config, if SASL is enabled on replica cluster then uncomment the below section
+      #sasl:
+      #  sasl_method: "SCRAM-SHA-512"
+      #  sasl_username: admin
+      #  sasl_password: passw0rd
       tls:
         enabled: false
         client_key: "/etc/redpanda/certs/agent.key"
