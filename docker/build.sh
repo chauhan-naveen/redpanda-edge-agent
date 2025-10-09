@@ -12,7 +12,7 @@ HELPTEXT='redpanda-edge-agent docker build script
 FILENAME="redpanda-edge-agent"
 PUSH=true
 TAG="latest"
-USERNAME="redpanda"
+USERNAME="AWS"
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -30,7 +30,7 @@ if [ $CWD == docker ]; then
   cd ..
 fi
 
-FILENAME="$USERNAME/$FILENAME:$TAG"
+FILENAME="123456789.dkr.ecr.us-west-2.amazonaws.com/redpanda-edge-agent:$TAG"
 
 docker build -f docker/Dockerfile -t $FILENAME .
 if [ $PUSH == true ]; then
