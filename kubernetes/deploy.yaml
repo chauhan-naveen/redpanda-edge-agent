@@ -77,6 +77,42 @@ spec:
       app: redpanda-edge
   template:
     metadata:
+      annotations:
+        ad.datadoghq.com/redpanda-edge-agent.check_names: '["openmetrics"]'
+        ad.datadoghq.com/redpanda-edge-agent.init_configs: '[{}]'
+        ad.datadoghq.com/redpanda-edge-agent.instances: |
+          [
+            {
+              "prometheus_url": "http://%%host%%:8080/metrics",
+              "namespace": "",
+              "metrics": [
+                "redpanda_edge_agent_up",
+                "redpanda_edge_agent_source_brokers_total",
+                "redpanda_edge_agent_destination_brokers_total",
+                "redpanda_edge_agent_source_topics_total",
+                "redpanda_edge_agent_destination_topics_total",
+                "redpanda_edge_agent_source_partitions_total",
+                "redpanda_edge_agent_destination_partitions_total",
+                "redpanda_edge_agent_uncommitted_offsets_total",
+                "redpanda_edge_agent_partitions_per_topic",
+                "redpanda_edge_agent_source_ping_ms",
+                "redpanda_edge_agent_destination_ping_ms",
+                "redpanda_edge_agent_metrics_last_scrape_age_seconds",
+                "redpanda_edge_agent_total_lag",
+                "redpanda_edge_agent_max_lag",
+                "redpanda_edge_agent_committed_offset",
+                "redpanda_edge_agent_consumer_bytes_total",
+                "redpanda_edge_agent_producer_bytes_total",
+                "redpanda_edge_agent_records_fetched_total",
+                "redpanda_edge_agent_records_sent_total",
+                "redpanda_edge_agent_fetch_errors_total",
+                "redpanda_edge_agent_produce_errors_total",
+                "redpanda_edge_agent_commit_errors_total",
+                "redpanda_edge_agent_backoff_duration_seconds",
+                "redpanda_edge_agent_partition_lag"
+              ]
+            }
+          ]
       labels:
         app: redpanda-edge
     spec:
@@ -96,6 +132,18 @@ spec:
             #cpu: 1
             memory: 128Mi
             cpu: 500m
+        env:
+        - name: REDPANDA_METRICS_PORT
+          value: "8080"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
       volumes:
       - name: agent-config
         configMap:
