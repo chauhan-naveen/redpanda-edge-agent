@@ -9,4 +9,5 @@ FROM alpine:3.20
 RUN apk update && apk upgrade && apk add bash libc6-compat
 WORKDIR /app
 COPY --from=build /app/redpanda-edge-agent ./
+EXPOSE 8080
 CMD ["./redpanda-edge-agent", "-config", "/etc/redpanda/agent.yaml", "-loglevel", "debug"]

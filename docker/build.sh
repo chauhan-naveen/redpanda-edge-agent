@@ -10,7 +10,7 @@ HELPTEXT='redpanda-edge-agent docker build script
 '
 
 FILENAME="redpanda-edge-agent"
-PUSH=true
+PUSH=false
 TAG="latest"
 USERNAME="AWS"
 
