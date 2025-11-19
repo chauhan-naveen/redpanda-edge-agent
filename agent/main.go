@@ -262,20 +262,15 @@ func checkTopics(cluster *Redpanda) {
 // The backoff period is determined by the number of sequential
 // fetch errors received, and it increases exponentially up to
 // a maximum number of seconds set by 'maxBackoffSec'.
-//
-// For example:
-//
-//	2 fetch errors = 2 ^ 2 = 4 second backoff
-//	3 fetch errors = 3 ^ 2 = 9 second backoff
-//	4 fetch errors = 4 ^ 2 = 16 second backoff
-func backoff(exp *int) {
+func backoff(exp *int, direction string) {
 	*exp += 1
-	backoff := math.Pow(float64(*exp), 2)
-	if backoff >= config.Float64("max_backoff_secs") {
-		backoff = config.Float64("max_backoff_secs")
+	backoffSec := math.Pow(float64(*exp), 2)
+	if backoffSec >= config.Float64("max_backoff_secs") {
+		backoffSec = config.Float64("max_backoff_secs")
 	}
-	log.Warnf("Backing off for %d seconds", int(backoff))
-	time.Sleep(time.Duration(backoff) * time.Second)
+	log.Warnf("Backing off for %d seconds", int(backoffSec))
+	BackoffDuration.WithLabelValues(os.Getenv("POD_NAME"), direction).Observe(backoffSec)
+	time.Sleep(time.Duration(backoffSec) * time.Second)
 }
 
 // Log with additional "id" field to identify whether the log message is coming
@@ -308,6 +303,12 @@ func forwardRecords(src *Redpanda, dst *Redpanda, ctx context.Context) {
 	logWithId("info", src.name,
 		fmt.Sprintf("Forwarding records from '%s' to '%s'", src.name, dst.name))
 
+	direction := "push"
+	if src.prefix == Destination {
+		direction = "pull"
+	}
+	podName := os.Getenv("POD_NAME") // Add pod name for metrics
+
 	topicMap := make(map[string]string)
 	partitionMap := make(map[string]int)
 	for _, t := range AllTopics() {
@@ -339,12 +340,14 @@ func forwardRecords(src *Redpanda, dst *Redpanda, ctx context.Context) {
 					logWithId("error", src.name, fmt.Sprintf("Fetch error: %s, topic=%s, partition=%d", e.Err, e.Topic, e.Partition))
 					logWithId("error", src.name,
 						fmt.Sprintf("Fetch error: %s", e.Err))
+					FetchErrors.WithLabelValues(podName, direction).Inc()
 				}
-				backoff(&errCount)
+				backoff(&errCount, direction)
 			}
 			if len(fetches.Records()) > 0 {
 				logWithId("debug", src.name,
 					fmt.Sprintf("Consumed %d records", len(fetches.Records())))
+				RecordsFetched.WithLabelValues(podName, direction).Add(float64(len(fetches.Records())))
 				iter := fetches.RecordIter()
 				for !iter.Done() {
 					record := iter.Next()
@@ -373,17 +376,19 @@ func forwardRecords(src *Redpanda, dst *Redpanda, ctx context.Context) {
 		}
 
 		if !sent && !committed {
-			//Calculate Partition using murmur hash on key mod # of partitions
 			// Send records to destination
 			iter := fetches.RecordIter()
 			for !iter.Done() {
 				record := iter.Next()
-				//Calculate Partition using murmur hash on key mod # of partitions
+				// Calculate Partition using murmur hash on key mod # of partitions
 				partitionCount, exists := partitionMap[record.Topic]
 				if exists {
 					partition := Murmur2Partition(record.Key, int32(partitionCount))
 					record.Partition = partition
 				}
+				// Count consumer bytes before producing
+				consumerBytes.WithLabelValues(podName).Add(float64(len(record.Key) + len(record.Value)))
+
 				err := dst.client.ProduceSync(
 					ctx, record).FirstErr()
 				if err != nil {
@@ -394,8 +399,12 @@ func forwardRecords(src *Redpanda, dst *Redpanda, ctx context.Context) {
 					}
 					logWithId("error", src.name,
 						fmt.Sprintf("Unable to send %d record:%s,%d to %s: %s", 1, record.Topic, record.Partition, dst.name, err.Error()))
-					backoff(&errCount)
+					ProduceErrors.WithLabelValues(podName, direction).Inc()
+					backoff(&errCount, direction)
 				} else {
+					// Count producer bytes only on success
+					producerBytes.WithLabelValues(podName).Add(float64(len(record.Key) + len(record.Value)))
+					RecordsSent.WithLabelValues(podName, direction).Inc()
 					sent = true
 					logWithId("debug", src.name,
 						fmt.Sprintf("Sent %d records to %s", 1, dst.name))
@@ -420,7 +429,8 @@ func forwardRecords(src *Redpanda, dst *Redpanda, ctx context.Context) {
 				}
 				logWithId("error", src.name,
 					fmt.Sprintf("Unable to commit offsets: %s", err.Error()))
-				backoff(&errCount)
+				CommitErrors.WithLabelValues(podName, direction).Inc()
+				backoff(&errCount, direction)
 			} else {
 				errCount = 0 // Reset error counter
 				committed = true
